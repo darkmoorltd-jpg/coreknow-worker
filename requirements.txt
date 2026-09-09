@@ -1,5 +1,4 @@
 requests
 supabase
-sentence-transformers
 beautifulsoup4
 feedparser

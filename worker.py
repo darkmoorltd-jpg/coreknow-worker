@@ -4,21 +4,17 @@ import time
 import requests
 import json
 from supabase import create_client
-from sentence_transformers import SentenceTransformer
 from bs4 import BeautifulSoup
 import feedparser
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-MODEL_NAME = "all-MiniLM-L6-v2"
 
-class VectorStorage:
+class LightVectorStorage:
     def __init__(self):
         self.client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        self.model = SentenceTransformer(MODEL_NAME)
-    def embed_text(self, text):
-        return self.model.encode(text).astype("float32").tolist()
-    def chunk_text(self, content, chunk_size=500):
+
+    def chunk_text(self, content, chunk_size=800):
         words = content.split()
         chunks = []
         current = []
@@ -34,12 +30,22 @@ class VectorStorage:
         if current:
             chunks.append(" ".join(current))
         return chunks
+
     def store_document(self, name, format, content):
-        doc_res = self.client.table("coreknow_documents").insert({"name":name,"format":format,"content":content}).execute()
+        # Insert document
+        doc_res = self.client.table("coreknow_documents").insert({
+            "name": name,
+            "format": format,
+            "content": content
+        }).execute()
         doc_id = doc_res.data[0]["id"]
+        # Insert chunks (NO embedding to save memory)
         for chunk in self.chunk_text(content):
-            emb = self.embed_text(chunk)
-            self.client.table("coreknow_chunks").insert({"document_id":doc_id,"chunk_text":chunk,"embedding":emb}).execute()
+            self.client.table("coreknow_chunks").insert({
+                "document_id": doc_id,
+                "chunk_text": chunk,
+                "embedding": None  # we can add later with a paid plan
+            }).execute()
         return doc_id
 
 class MultiSourceSearch:
@@ -54,7 +60,7 @@ class MultiSourceSearch:
         self.wikidata = "https://www.wikidata.org/w/api.php"
         self.github = "https://api.github.com/search/repositories"
 
-    def search_wikipedia(self, q, limit=3):
+    def search_wikipedia(self, q, limit=2):
         try:
             params = {"action":"query","list":"search","srsearch":q,"srlimit":limit,"format":"json"}
             r = requests.get(self.wikipedia, params=params, headers={"User-Agent":self.ua}, timeout=15)
@@ -63,7 +69,7 @@ class MultiSourceSearch:
         except: pass
         return []
 
-    def search_duckduckgo(self, q, limit=3):
+    def search_duckduckgo(self, q, limit=2):
         try:
             r = requests.post("https://html.duckduckgo.com/html/", data={"q":q}, headers={"User-Agent":self.ua}, timeout=15)
             if r.status_code==200:
@@ -72,7 +78,7 @@ class MultiSourceSearch:
         except: pass
         return []
 
-    def search_arxiv(self, q, limit=3):
+    def search_arxiv(self, q, limit=2):
         try:
             params = {"search_query":f"all:{q}","start":0,"max_results":limit}
             r = requests.get(self.arxiv, params=params, headers={"User-Agent":self.ua}, timeout=15)
@@ -82,7 +88,7 @@ class MultiSourceSearch:
         except: pass
         return []
 
-    def search_openalex(self, q, limit=3):
+    def search_openalex(self, q, limit=2):
         try:
             params = {"search":q,"per-page":limit}
             r = requests.get(self.openalex, params=params, headers={"User-Agent":self.ua}, timeout=15)
@@ -91,7 +97,7 @@ class MultiSourceSearch:
         except: pass
         return []
 
-    def search_crossref(self, q, limit=3):
+    def search_crossref(self, q, limit=2):
         try:
             params = {"query":q,"rows":limit}
             r = requests.get(self.crossref, params=params, headers={"User-Agent":self.ua}, timeout=15)
@@ -101,7 +107,7 @@ class MultiSourceSearch:
         except: pass
         return []
 
-    def search_semantic(self, q, limit=3):
+    def search_semantic(self, q, limit=2):
         try:
             params = {"query":q,"limit":limit,"fields":"title,abstract,url"}
             r = requests.get(self.semantic, params=params, headers={"User-Agent":self.ua}, timeout=15)
@@ -110,7 +116,7 @@ class MultiSourceSearch:
         except: pass
         return []
 
-    def search_pubmed(self, q, limit=3):
+    def search_pubmed(self, q, limit=2):
         try:
             params = {"db":"pubmed","term":q,"retmax":limit,"retmode":"json"}
             r = requests.get(self.pubmed, params=params, headers={"User-Agent":self.ua}, timeout=15)
@@ -119,7 +125,7 @@ class MultiSourceSearch:
         except: pass
         return []
 
-    def search_wikidata(self, q, limit=3):
+    def search_wikidata(self, q, limit=2):
         try:
             params = {"action":"wbsearchentities","search":q,"language":"en","limit":limit,"format":"json"}
             r = requests.get(self.wikidata, params=params, headers={"User-Agent":self.ua}, timeout=15)
@@ -128,7 +134,7 @@ class MultiSourceSearch:
         except: pass
         return []
 
-    def search_github(self, q, limit=3):
+    def search_github(self, q, limit=2):
         try:
             params = {"q":q,"per_page":limit}
             r = requests.get(self.github, params=params, headers={"User-Agent":self.ua}, timeout=15)
@@ -163,7 +169,7 @@ class MultiSourceSearch:
 
 class ContinuousLearner:
     def __init__(self):
-        self.vs = VectorStorage()
+        self.vs = LightVectorStorage()
         self.search = MultiSourceSearch()
         self.queue = self.load_topics()
         self.visited = set()
@@ -175,19 +181,19 @@ class ContinuousLearner:
                 topics = []
                 for cat in data.values():
                     topics.extend(cat)
-                return topics[:500]
+                return topics[:200]
         except:
             return ["physics","mathematics","chemistry","biology","artificial intelligence"]
 
     def find_related(self, topic):
         try:
             url = "https://en.wikipedia.org/w/api.php"
-            params = {"action":"query","prop":"links","titles":topic,"pllimit":10,"format":"json"}
+            params = {"action":"query","prop":"links","titles":topic,"pllimit":5,"format":"json"}
             r = requests.get(url, params=params, timeout=15, headers={"User-Agent":"CoreKnow/1.0"})
             if r.status_code == 200:
                 pages = r.json().get("query",{}).get("pages",{})
                 for pid in pages:
-                    return [l["title"] for l in pages[pid].get("links",[])[:10]]
+                    return [l["title"] for l in pages[pid].get("links",[])[:5]]
         except: pass
         return []
 
@@ -212,7 +218,7 @@ class ContinuousLearner:
             topic = self.queue.pop(0)
             self.learn_topic(topic)
             time.sleep(3)
-        print("Queue empty. Worker exiting.")
+        print("Queue empty.")
 
 if __name__ == "__main__":
     ContinuousLearner().run()
